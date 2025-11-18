@@ -1,0 +1,75 @@
+# Pico / microcontroller project .gitignore
+
+# Build directories
+/build/
+build/
+cmake-build-*/
+out/
+bin/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+Testing/
+CTestTestfile.cmake
+
+# Compiler outputs
+*.o
+*.obj
+*.a
+*.so
+*.lib
+*.dll
+*.exe
+*.elf
+*.hex
+*.bin
+*.uf2
+*.map
+*.lst
+*.sym
+*.d
+
+# Linker/coverage/temp
+*.gcda
+*.gcno
+
+# Pico SDK / CMake helper files
+pico-sdk/build/
+.pico_sdk_import.cmake
+
+# PlatformIO
+.pio/
+.pioenvs/
+
+# Python / Thonny / virtualenv
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# IDEs and editors
+.vscode/
+.vscode-test/
+.idea/
+*.iml
+.vs/
+*.sublime-workspace
+*.sublime-project
+
+# Temp / OS
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs and local config
+*.log
+.local
+.env
