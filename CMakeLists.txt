@@ -24,8 +24,8 @@ set(SRC ${CMAKE_CURRENT_LIST_DIR}/src)
 add_executable(coap_server
     ${SRC}/coap_server.c
     ${CS04_SRC}/cs04_coap_packet.c
-    ${CS04_SRC}/cs04_coap_reliability.c 
-    ${CS04_SRC}/cs04_hardware.c 
+    ${CS04_SRC}/cs04_coap_reliability.c
+    ${CS04_SRC}/cs04_hardware.c
     ${MICROCOAP_SRC}/coap.c
     ${FATFS_SRC}/ff15/source/ff.c
     ${FATFS_SRC}/sd_driver/sd_card.c
@@ -62,8 +62,8 @@ pico_enable_stdio_uart(coap_server 0)
 add_executable(coap_client
     ${SRC}/coap_client.c
     ${CS04_SRC}/cs04_coap_packet.c
-    ${CS04_SRC}/cs04_coap_reliability.c 
-    ${CS04_SRC}/cs04_hardware.c 
+    ${CS04_SRC}/cs04_coap_reliability.c
+    ${CS04_SRC}/cs04_hardware.c
     ${MICROCOAP_SRC}/coap.c
     ${FATFS_SRC}/ff15/source/ff.c
     ${FATFS_SRC}/sd_driver/sd_card.c
@@ -94,3 +94,50 @@ target_link_libraries(coap_client PRIVATE
 pico_add_extra_outputs(coap_client)
 pico_enable_stdio_usb(coap_client 1)
 pico_enable_stdio_uart(coap_client 0)
+
+
+# Define the test executable
+add_executable(unit_component_tests test/unit_component_test.c)
+
+# Link your SPECIFIC project source files (Exclude main files)
+target_sources(unit_component_tests PRIVATE
+    test/unit_component_test.c
+    ${CS04_SRC}/cs04_coap_packet.c
+    ${CS04_SRC}/cs04_coap_reliability.c
+    ${CS04_SRC}/cs04_hardware.c
+    ${MICROCOAP_SRC}/coap.c
+    ${FATFS_SRC}/ff15/source/ff.c
+    ${FATFS_SRC}/sd_driver/sd_card.c
+    ws2812.c                    # Assuming ws2812.c is in the root
+)
+
+# Includes
+target_include_directories(unit_component_tests PRIVATE
+    test                            # For unit_testing.c
+    ${CMAKE_CURRENT_LIST_DIR}       # For lwipopts.h, ws2812.h etc.
+    ${MICROCOAP_SRC}                # For coap.h
+    ${FATFS_SRC}/ff15/source        # For ff.h
+    ${FATFS_SRC}/sd_driver          # For sd_card.h (if it exists)
+    ${FATFS_SRC}                    # For hw_config.h (if needed)
+    ${CS04_SRC}
+)
+
+# Link Pico Libraries
+target_link_libraries(unit_component_tests
+    pico_stdlib
+    pico_cyw43_arch_lwip_poll
+    hardware_spi
+    hardware_pio
+    FatFs_SPI
+)
+
+# Generate PIO header (Needed because cs04_hardware.c includes ws2812.pio.h)
+pico_generate_pio_header(unit_component_tests ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
+
+
+# Enable USB Output so you can see results
+pico_enable_stdio_usb(unit_component_tests 1)
+pico_enable_stdio_uart(unit_component_tests 0)
+
+# Output .uf2
+pico_add_extra_outputs(unit_component_tests)

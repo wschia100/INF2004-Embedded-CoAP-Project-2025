@@ -25,6 +25,32 @@ Shared CoAP protocol utilities used by both client and server.
 
 **Key Functions**:
 ```c
+// Send CON request (GET/PUT/iPATCH)
+uint16_t coap_send_con_request(
+    struct udp_pcb *pcb,
+    const ip_addr_t *dest_ip,
+    u16_t dest_port,
+    coap_method_t method,
+    const char *uri_path,
+    const coap_buffer_t *token,
+    const uint8_t *payload,
+    size_t payload_len,
+    bool store_for_retransmit
+);
+
+// Send FETCH request (RFC 8132 compliant)
+uint16_t coap_send_fetch_request(
+    struct udp_pcb *pcb,
+    const ip_addr_t *dest_ip,
+    u16_t dest_port,
+    const char *uri_path,
+    const coap_buffer_t *token,
+    const uint8_t *payload,
+    size_t payload_len,
+    uint8_t content_format,  // REQUIRED: 0 for text/plain
+    bool store_for_retransmit
+);
+
 // Send CON notification with Block2 support
 uint16_t coap_send_con_notification(
     struct udp_pcb *pcb,
@@ -40,434 +66,656 @@ uint16_t coap_send_con_notification(
     bool is_image
 );
 
-// Send CON request (GET/PUT/iPATCH/FETCH)
-uint16_t coap_send_con_request(
+// Send ACK response
+void coap_send_ack(
     struct udp_pcb *pcb,
-    const ip_addr_t *ip,
+    const ip_addr_t *addr,
     u16_t port,
-    uint8_t method,
-    const char *path,
-    const coap_buffer_t *token,
+    const coap_packet_t *req,
     const uint8_t *payload,
-    size_t payload_len,
-    bool store_for_retransmit
+    size_t payload_len
 );
 
-// Send ACK/Block ACK responses
-void coap_send_ack(...);
-void coap_send_block_ack(...);
+// Send Block2 ACK for file transfers
+void coap_send_block_ack(
+    struct udp_pcb *pcb,
+    const ip_addr_t *addr,
+    u16_t port,
+    const coap_packet_t *req,
+    const coap_option_t *block2_opt
+);
+
+// Helper: Generate random message ID
+uint16_t coap_generate_msg_id(void);
+
+// Helper: Generate random token
+void coap_generate_token(coap_buffer_t *token, uint8_t *token_data, size_t len);
+
+// Helper: Check if tokens match
+bool coap_token_matches(const coap_buffer_t *tok1, const coap_buffer_t *tok2);
 ```
 
-**Features**:
-- Automatic message ID generation
-- Block2 option encoding for file transfers
-- Content-Format option for image detection
-- Token management
+**Design Notes**:
+- Separates FETCH requests from generic CON requests for RFC 8132 compliance
+- Automatically adds Content-Format and Accept options for FETCH
+- Handles retransmission storage via `cs04_coap_reliability.c`
+- Supports both text and image Content-Format for Block2 transfers
+
+***
 
 #### `cs04_coap_reliability.c/h`
-**Purpose**: Message retransmission and duplicate detection
-
-**Key Data Structures**:
-```c
-typedef struct {
-    bool active;
-    uint16_t msgid;
-    ip_addr_t dest_ip;
-    u16_t dest_port;
-    uint8_t buffer[1024];
-    size_t buffer_len;
-    uint32_t last_send_time;
-    uint8_t retries;
-} pending_message_t;
-
-typedef struct {
-    uint16_t msgids[16];  // Sliding window
-    uint8_t count;
-    uint8_t head;
-} duplicate_detector_t;
-```
+**Purpose**: Automatic retransmission and duplicate detection
 
 **Key Functions**:
 ```c
 // Store message for retransmission
-void coap_store_for_retransmit(...);
+void coap_store_for_retransmit(
+    uint16_t msg_id,
+    const ip_addr_t *dest_ip,
+    u16_t dest_port,
+    const uint8_t *packet,
+    size_t packet_len
+);
 
-// Check all pending messages and retransmit if needed
+// Clear message from pending queue (on ACK received)
+void coap_clear_pending_message(uint16_t msg_id);
+
+// Periodic retransmission check (call from main loop)
 void coap_check_retransmissions(struct udp_pcb *pcb);
 
-// Remove message after receiving ACK
-void coap_clear_pending_message(uint16_t msgid);
+// Check if message ID is duplicate
+bool coap_is_duplicate_message(duplicate_detector_t *detector, uint16_t msg_id);
 
-// Duplicate detection
-bool coap_is_duplicate_message(duplicate_detector_t *detector, uint16_t msgid);
-void coap_record_message_id(duplicate_detector_t *detector, uint16_t msgid);
+// Record message ID to prevent duplicate processing
+void coap_record_message_id(duplicate_detector_t *detector, uint16_t msg_id);
 ```
 
-**Retransmission Policy**:
-- Max retries: 4
-- Timeout sequence: 2s, 4s, 8s, 16s (exponential backoff)
-- Callback on failure: `on_retransmit_failure()`
+**Retransmission Logic**:
+- **Initial timeout**: 2000ms (2 seconds)
+- **Max retries**: 4 attempts
+- **Backoff**: Exponential (2s → 4s → 8s → 16s → 32s)
+- **Total timeout**: ~62 seconds before giving up
+- **Queue size**: 10 pending messages maximum
+- **Duplicate detection**: Last 16 message IDs tracked
 
-#### `cs04_hardware.c/h`
-**Purpose**: Hardware abstraction for GPIO, SD card, and audio/visual feedback
-
-**Key Functions**:
-```c
-// Button handling with debouncing
-typedef struct {
-    uint gpio;
-    bool last_state;
-} button_t;
-
-void hw_button_init(button_t *btn, uint gpio);
-bool hw_button_pressed(button_t *btn);
-
-// Buzzer control
-void hw_buzz(uint gpio, uint freq_hz, uint duration_ms);
-
-// SD card initialization
-bool hw_sd_init(FATFS *fs);
-
-// WS2812 RGB control wrapper
-uint32_t hw_urgb_u32(uint8_t r, uint8_t g, uint8_t b, float brightness);
-```
-
-**Hardware Debouncing**: 50ms polling interval prevents false button presses
-
----
-
-### `/src/coap_server.c`
-
-**Purpose**: CoAP server with observable resources and file serving
-
-#### Key Configurations
-```c
-#define STATIC_IP_ADDR    "192.168.137.50"
-#define COAP_SERVER_PORT  5683
-#define MAX_SUBSCRIBERS   5
-#define BLOCK_SIZE        1024
-```
-
-#### Endpoints
-```c
-const coap_endpoint_t endpoints[] = {
-    {COAP_METHOD_GET, handle_get_buttons, &path_buttons, "ct=0;obs"},
-    {COAP_METHOD_GET, handle_get_actuators, &path_actuators, "ct=0"},
-    {COAP_METHOD_PUT, handle_put_actuators, &path_actuators, "ct=0"},
-    {COAP_METHOD_iPATCH, handle_ipatch_file, &path_file, "ct=0"},
-    {COAP_METHOD_FETCH, handle_fetch_file, &path_file, "ct=0"},
-};
-```
-
-#### Subscriber Management
+**Data Structures**:
 ```c
 typedef struct {
     bool active;
-    ip_addr_t ip;
-    u16_t port;
-    coap_buffer_t token;
-    uint16_t observe_seq;
-    uint32_t last_ack_time;
-    uint32_t timeout_sessions;
-} coap_subscriber_t;
-```
+    uint16_t msg_id;
+    ip_addr_t dest_ip;
+    u16_t dest_port;
+    uint8_t retransmit_count;
+    uint32_t next_retry_ms;
+    uint8_t packet_buf;
+    size_t packet_len;
+} pending_message_t;
 
-**Timeout Policy**:
-- No ACK for 3 hours → increment timeout counter
-- 3 timeouts → subscriber removed
-- Checked every 5 seconds in main loop
-
-#### File Transfer State Machine
-```c
 typedef struct {
-    FIL file;
-    uint32_t block_num;
-    bool transfer_active;
-    bool waiting_for_ack;
-    bool is_image;
-    char filename[32];
-} file_transfer_state_t;
+    uint16_t recent_msg_ids[RECENT_MSG_HISTORY];
+    uint8_t recent_msg_idx;
+} duplicate_detector_t;
 ```
 
-**Block Transfer Flow**:
-1. Button 3 pressed → `start_file_transfer()`
-2. For each subscriber → `send_next_file_block()`
-3. Wait for ACK → set `waiting_for_ack = true`
-4. On ACK received → increment `block_num`, send next block
-5. Last block (more=0) → close file, reset state
+***
 
-#### FETCH Implementation
+#### `cs04_hardware.c/h`
+**Purpose**: Hardware abstraction for GPIO, LED, buzzer, and SD card
+
+**Key Functions**:
 ```c
-int handle_fetch_file(...) {
-    // Parse requested line count from payload
-    int numlines = atoi(payload);
+// Button state management
+typedef struct {
+    uint pin;
+    bool last_state;
+} button_t;
 
-    // Read lines into buffer (max 1024 bytes)
-    char fetchbuffer[1024];
-    while (linesread < numlines && buffer_not_full) {
-        fgets(line, 256, file);
-        memcpy(fetchbuffer + bufferpos, line, linelen);
-    }
+void hw_button_init(button_t *btn, uint pin);
+bool hw_button_pressed(button_t *btn);
 
-    // Send response
-    return coap_make_response(..., fetchbuffer, bufferpos, ...);
+// LED control (WS2812 RGB)
+void hw_led_set_color(uint8_t r, uint8_t g, uint8_t b, float brightness);
+void hw_led_off(void);
+void hw_led_blink(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms);
+
+// Simple feedback patterns
+void hw_signal_success(void);
+void hw_signal_error(void);
+void hw_signal_progress(void);
+
+// Advanced feedback signals
+void hw_play_file_complete_signal(PIO pio, uint sm, uint buzzer_pin);
+void hw_play_string_signal(PIO pio, uint sm, uint buzzer_pin);
+void hw_play_fetch_signal(PIO pio, uint sm, uint buzzer_pin);
+void hw_play_append_success_signal(PIO pio, uint sm, uint buzzer_pin);
+void hw_play_fetch_success_signal(PIO pio, uint sm, uint buzzer_pin);
+
+// Buzzer control
+void hw_buzz(uint pin, uint frequency_hz, uint duration_ms);
+
+// SD card
+bool hw_sd_init(FATFS *fs);
+bool hw_file_exists(const char *filename);
+
+// LED color helper
+uint32_t hw_urgb_u32(uint8_t r, uint8_t g, uint8_t b, float brightness);
+```
+
+**LED Feedback Patterns**:
+| Signal | Function | LED Color | Buzzer | Use Case |
+|--------|----------|-----------|--------|----------|
+| File Complete | `hw_play_file_complete_signal` | Green 3-blink | 1500Hz, 60ms × 3 | File transfer complete |
+| String Notification | `hw_play_string_signal` | Green 2-blink | 1200Hz, 60ms × 2 | Button notification received |
+| Fetch | `hw_play_fetch_signal` | Cyan 3-blink | 1800Hz, 40ms × 3 | FETCH request sent |
+| Append Success | `hw_play_append_success_signal` | Green 2-blink | 1800Hz, 60ms × 2 | iPATCH append confirmed |
+| Fetch Success | `hw_play_fetch_success_signal` | Cyan 3-blink | 1800Hz, 40ms × 3 | FETCH response received |
+
+***
+
+### `/src/coap_server.c`
+
+**Main Components**:
+1. **Endpoint Handlers** - Process incoming CoAP requests
+2. **Button State Management** - Monitor GPIO and send notifications
+3. **Subscriber Management** - Track Observe clients
+4. **File Transfer** - Block-wise file sending
+
+**Key Endpoint Handlers**:
+
+#### `handle_get_actuators()`
+```c
+int handle_get_actuators(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t id_hi, uint8_t id_lo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+- Returns current LED and buzzer state
+- Response: `LED=ON,BUZZER=OFF`
+
+***
+
+#### `handle_put_actuators()`
+```c
+int handle_put_actuators(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t id_hi, uint8_t id_lo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+- Parses payload: `LED=ON`, `BUZZER=OFF`, etc.
+- Controls GPIO 28 (LED) and GPIO 18 (buzzer)
+- Response: `OK`
+
+***
+
+#### `handle_get_buttons()`
+```c
+int handle_get_buttons(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t id_hi, uint8_t id_lo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+- Checks for Observe option (0 = subscribe)
+- Adds client to subscriber list
+- Returns current button states
+- Response: `BTN1=0, BTN2=1, BTN3=0`
+
+***
+
+#### `handle_get_file()`
+```c
+int handle_get_file(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t id_hi, uint8_t id_lo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+- Supports Block2 option for large file transfers
+- Query parameter `type=image` switches to JPEG
+- Opens `server.txt` or `server.jpg` from SD card
+- Sends 1024-byte blocks with Block2 option
+- Tracks transfer state per client
+
+**Block2 Format**:
+- `NUM=block_number`, `M=more_blocks`, `SZX=size_exponent`
+- Example: Block 0 of 1024 bytes, more blocks: `NUM=0, M=1, SZX=6`
+
+***
+
+#### `handle_ipatch_file()`
+```c
+int handle_ipatch_file(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t idhi, uint8_t idlo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+- Opens `server.txt` in append mode
+- Writes payload to end of file
+- Response: `Appended`
+
+**Error Handling**:
+- File not found → `4.04 Not Found`
+- SD card error → `5.03 Service Unavailable`
+
+***
+
+#### `handle_fetch_file()` **(RFC 8132 Compliant)**
+```c
+int handle_fetch_file(
+    coap_rw_buffer_t *scratch,
+    const coap_packet_t *inpkt,
+    coap_packet_t *outpkt,
+    uint8_t idhi, uint8_t idlo,
+    const ip_addr_t *addr, u16_t port
+)
+```
+
+**Payload Format**: `"start,end"` (inclusive range, zero-indexed)
+- Example: `"0,4"` = lines 0-4 (5 lines)
+- Example: `"10,15"` = lines 10-15 (6 lines)
+- Backward compatible: `"5"` = first 5 lines (lines 0-4)
+
+**Validation Steps**:
+1. ✅ Check Content-Format option is present
+2. ✅ Verify Content-Format = 0 (text/plain)
+3. ✅ Parse `"start,end"` from payload
+4. ✅ Validate `start >= 0` and `end >= 0`
+5. ✅ Validate `end >= start`
+6. ✅ Open `server.txt` from SD card
+7. ✅ Skip to `start` line
+8. ✅ Read lines until `end` or buffer full (1024 bytes)
+
+**Error Responses**:
+```c
+// Missing Content-Format option
+return 4.00 Bad Request: "Content-Format required"
+
+// Wrong Content-Format
+return 4.15 Unsupported Content-Format
+
+// Negative line numbers
+return 4.00 Bad Request: "Invalid start/end line"
+
+// Reversed range (end < start)
+return 4.00 Bad Request: "Invalid range"
+
+// File not found
+return 4.04 Not Found
+```
+
+**Graceful EOF Handling**:
+- Start beyond file length → Returns `2.05 Content` with empty payload
+- End beyond file length → Returns partial data (lines until EOF)
+
+***
+
+**Button Notification Flow**:
+```c
+// Main loop monitors button states
+bool btn1_pressed = !gpio_get(BUTTON_1_PIN);  // GP20
+bool btn2_pressed = !gpio_get(BUTTON_2_PIN);  // GP21
+bool btn3_pressed = !gpio_get(BUTTON_3_PIN);  // GP22
+
+if (btn1_pressed && !prev_btn1_state) {
+    // Send byte notification to all subscribers
+    notify_subscribers_with_data(0x42, 1);
+}
+
+if (btn2_pressed && !prev_btn2_state) {
+    // Send button state string
+    char payload;
+    snprintf(payload, sizeof(payload),
+             "BTN1=%d,BTN2=1,BTN3=%d", btn1_state, btn3_state);
+    notify_subscribers_with_string(payload);
+}
+
+if (btn3_pressed && !prev_btn3_state) {
+    // Send button state string
+    char payload;
+    snprintf(payload, sizeof(payload),
+             "BTN1=%d,BTN2=%d,BTN3=1", btn1_state, btn2_state);
+    notify_subscribers_with_string(payload);
 }
 ```
 
-**Buffer Limit**: Stops reading when 1024 bytes reached, even if fewer lines than requested
+**Subscriber Management**:
+```c
+typedef struct {
+    ip_addr_t ip;
+    uint16_t port;
+    coap_buffer_t token;
+    uint8_t token_data[MAX_TOKEN_LEN];
+    uint16_t observe_seq;
+    uint32_t last_ack_time;
+    uint8_t timeout_sessions;
+    bool active;
+} subscriber_t;
 
----
+subscriber_t subscribers[MAX_SUBSCRIBERS];
+```
+
+- Tracks up to 5 subscribers
+- Automatic timeout after 3 failed notifications
+- Observe sequence number increments per notification
+
+***
 
 ### `/src/coap_client.c`
 
-**Purpose**: CoAP client with auto-subscribe and direct SD card file reception
+**Main Components**:
+1. **Request Functions** - Send CoAP requests to server
+2. **Response Handlers** - Process server responses
+3. **Button Input** - Trigger requests via GPIO
+4. **Auto-subscribe** - Automatically observe server buttons on startup
 
-#### Key Configurations
+**Key Request Functions**:
+
+#### `request_put_actuators()`
 ```c
-#define COAP_SERVER_IP    "192.168.137.50"
-#define BLOCK_SIZE        1024  // Must match server
-#define RECEIVED_FILENAME "fromserver.txt"
-#define RECEIVED_IMAGE_FILENAME "fromserver.jpg"
+void request_put_actuators(const char *payload)
+```
+- Sends PUT `/actuators` with payload
+- Example: `"LED=ON,BUZZER=ON"`
+- Triggers yellow LED + 1200Hz buzz
+
+***
+
+#### `request_ipatch_file()`
+```c
+void request_ipatch_file(const char *line)
+```
+- Sends iPATCH `/file` to append text
+- Triggers orange LED + 1400Hz buzz
+- On success: Green 2-blink + 1800Hz
+
+***
+
+#### `request_fetch_file()` **(RFC 8132 Compliant)**
+```c
+void request_fetch_file(int start_line, int end_line)
+```
+- Builds payload: `"start,end"` format
+- Example: `request_fetch_file(0, 4)` → payload `"0,4"`
+- Calls `coap_send_fetch_request()` with Content-Format: 0
+- Triggers cyan LED + 1600Hz buzz
+- On success: Cyan 3-blink + 1800Hz
+- Saves response to `from_server_fetch.txt`
+
+**Example Usage**:
+```c
+// Fetch first 5 lines (lines 0-4)
+request_fetch_file(0, 4);
+
+// Fetch lines 10-15
+request_fetch_file(10, 15);
+
+// Pagination example
+static int fetch_start = 0;
+request_fetch_file(fetch_start, fetch_start + 4);
+fetch_start += 5;  // Move to next page
 ```
 
-#### Auto-Subscribe on Startup
+***
+
+#### `request_get_file()`
 ```c
-int main() {
-    // ... Wi-Fi connection ...
-    init_hardware();
+void request_get_file(bool is_image)
+```
+- Sends GET `/file` or GET `/file?type=image`
+- Uses Block2 option for 1024-byte blocks
+- Triggers purple LED + 1700Hz buzz
+- On complete: Green 3-blink + 1800Hz
+- Saves to `from_server.txt` or `from_server.jpg`
 
-    sleep_ms(1000);
-    printf("Auto-subscribing to buttons...\n");
-    request_subscribe_buttons();
+**Block Transfer State**:
+```c
+typedef struct {
+    FIL file_handle;
+    uint32_t next_block_num;
+    bool transfer_in_progress;
+    bool is_image;
+} block_transfer_state_t;
+```
 
-    // Main loop with button polling
+***
+
+**Button Handling**:
+```c
+// Main loop monitors buttons
+button_t btn_toggle, btn_append, btn_fetch;
+hw_button_init(&btn_toggle, BUTTON_PUT_PIN);   // GP21
+hw_button_init(&btn_append, BUTTON_APPEND_PIN); // GP20
+hw_button_init(&btn_fetch, BUTTON_FETCH_PIN);   // GP22
+
+if (hw_button_pressed(&btn_toggle)) {
+    request_put_actuators("LED=ON,BUZZER=ON");
+}
+
+if (hw_button_pressed(&btn_append)) {
+    char line;
+    snprintf(line, sizeof(line), "Appended at %lu\n", time_us_32());
+    request_ipatch_file(line);
+}
+
+// GP22: Short press = FETCH, Long press = GET file
+if (gpio_get(BUTTON_FETCH_PIN) == 0) {  // Pressed
+    if (fetch_press_start == 0) {
+        fetch_press_start = to_ms_since_boot(get_absolute_time());
+    }
+} else if (fetch_press_start > 0) {  // Released
+    uint32_t press_duration = to_ms_since_boot(get_absolute_time()) - fetch_press_start;
+
+    if (press_duration > 1000) {  // Long press (>1s)
+        request_get_file(file_type_toggle);  // Block transfer
+        file_type_toggle = !file_type_toggle;  // Toggle text/image
+    } else if (press_duration > 50) {  // Short press (debounced)
+        request_fetch_file(0, 4);  // FETCH first 5 lines
+    }
+
+    fetch_press_start = 0;
 }
 ```
 
-#### Direct SD Card Write
-**Optimization**: Writes blocks directly to SD card instead of buffering in RAM
+***
 
+**Response Handling**:
 ```c
-void udp_recv_callback(...) {
-    // Detect Block2 transfer
-    if (block2opt) {
-        uint32_t blocknum = blockval >> 4;
+void udp_recv_callback(void *arg, struct udp_pcb *pcb,
+                       struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
+    // Parse CoAP packet
+    coap_packet_t pkt;
+    coap_parse(&pkt, p->payload, p->tot_len);
 
-        // Open file on block 0
-        if (blocknum == 0 && !fileopen) {
-            f_open(&filehandle, filename, FA_WRITE | FA_CREATE_ALWAYS);
-            fileopen = true;
-        }
+    // Extract message ID and check for ACK
+    uint16_t msg_id = coap_extract_msg_id(&pkt);
+    if (pkt.hdr.t == COAP_TYPE_ACK) {
+        coap_clear_pending_message(msg_id);  // Stop retransmissions
+    }
 
-        // Write block directly to SD
-        f_lseek(&filehandle, blocknum * blocksize);
-        f_write(&filehandle, pkt.payload.p, pkt.payload.len, &bw);
+    // Check for duplicate
+    if (coap_is_duplicate_message(&client_dup_detector, msg_id)) {
+        pbuf_free(p);
+        return;  // Ignore duplicate
+    }
+    coap_record_message_id(&client_dup_detector, msg_id);
 
-        // Send ACK
-        coap_send_block_ack(...);
+    // Handle based on response code
+    uint8_t code_class = (pkt.hdr.code >> 5);
+    uint8_t code_detail = (pkt.hdr.code & 0x1F);
 
-        // Close on last block (more=0)
-        if (!more) {
-            f_close(&filehandle);
-            fileopen = false;
+    if (code_class == 2) {
+        // Success: 2.xx
+        handle_success_response(&pkt);
+    } else if (code_class == 4) {
+        // Client error: 4.xx
+        printf("Error: %d.%02d\n", code_class, code_detail);
+    }
+
+    pbuf_free(p);
+}
+```
+
+***
+
+## Common Patterns
+
+### Adding a New Endpoint
+
+**Server side** (`coap_server.c`):
+```c
+// 1. Define handler function
+int handle_my_endpoint(coap_rw_buffer_t *scratch,
+                       const coap_packet_t *inpkt,
+                       coap_packet_t *outpkt,
+                       uint8_t id_hi, uint8_t id_lo,
+                       const ip_addr_t *addr, u16_t port) {
+    // Process request
+    // Build response
+    return coap_make_response(scratch, outpkt, payload, len,
+                              id_hi, id_lo, &inpkt->tok,
+                              COAP_RSPCODE_CONTENT,
+                              COAP_CONTENTTYPE_TEXT_PLAIN);
+}
+
+// 2. Register in endpoint table
+const coap_endpoint_t endpoints[] = {
+    {COAP_METHOD_GET, handle_get_actuators, &path_actuators, "ct=0"},
+    {COAP_METHOD_GET, handle_my_endpoint, &path_my, "ct=0"},  // Add here
+    // ...
+};
+```
+
+**Client side** (`coap_client.c`):
+```c
+// Create request function
+void request_my_endpoint(const char *payload) {
+    ip_addr_t server_ip;
+    ip4addr_aton(COAP_SERVER_IP, &server_ip);
+
+    uint16_t msg_id = coap_send_con_request(
+        pcb, &server_ip, COAP_SERVER_PORT,
+        COAP_METHOD_GET,
+        "my_endpoint",
+        &client_token,
+        (const uint8_t*)payload, strlen(payload),
+        true  // Store for retransmit
+    );
+
+    printf("Request sent with msg_id 0x%04X\n", msg_id);
+}
+```
+
+***
+
+### Adding Hardware Feedback
+
+**In `cs04_hardware.c`**:
+```c
+void hw_play_my_signal(PIO pio, uint sm, uint buzzer_pin) {
+    // Set LED color
+    ws2812_put_pixel(pio, sm, hw_urgb_u32(100, 0, 100, 0.5f));  // Purple
+
+    // Play buzzer
+    hw_buzz(buzzer_pin, 1500, 100);  // 1500Hz, 100ms
+
+    // Optional: blink pattern
+    sleep_ms(100);
+    ws2812_put_pixel(pio, sm, 0);  // Off
+}
+```
+
+***
+
+## Debugging Tips
+
+### Enable Debug Logging
+```c
+#define DEBUG_COAP 1
+
+#if DEBUG_COAP
+    printf("[DEBUG] Message ID: 0x%04X\n", msg_id);
+    printf("[DEBUG] Token: ");
+    for (int i = 0; i < token.len; i++) {
+        printf("%02X", token.p[i]);
+    }
+    printf("\n");
+#endif
+```
+
+### Monitor Retransmissions
+```c
+// In cs04_coap_reliability.c
+void coap_check_retransmissions(struct udp_pcb *pcb) {
+    for (int i = 0; i < MAX_PENDING_MESSAGES; i++) {
+        if (pending[i].active) {
+            printf("[RETRY] msg_id=0x%04X, attempt=%d/%d\n",
+                   pending[i].msg_id, pending[i].retransmit_count, MAX_RETRIES);
         }
     }
 }
 ```
 
-**Block Validation**:
-- Duplicate blocks (same blocknum) → re-ACK and discard
-- Gap in sequence (blocknum > expected) → reject without ACK
-- Server will retransmit missing blocks
+### Capture Packets with Wireshark
+```bash
+# Filter for CoAP traffic
+udp.port == 5683
 
-#### Button Request Functions
-```c
-// GP21 - Toggle LED/buzzer
-void request_put_actuators(const char *payload) {
-    coap_send_con_request(pcb, server_ip, COAP_SERVER_PORT,
-                          COAP_METHOD_PUT, "actuators",
-                          &client_token, payload, strlen(payload), true);
-}
-
-// GP20 - Append to file
-void request_ipatch_file(const char *line) {
-    coap_send_con_request(pcb, server_ip, COAP_SERVER_PORT,
-                          COAP_METHOD_iPATCH, "file",
-                          &client_token, line, strlen(line), true);
-}
-
-// GP22 - Fetch lines
-void request_fetch_file(int numlines) {
-    char payload[16];
-    snprintf(payload, sizeof(payload), "%d", numlines);
-    coap_send_con_request(pcb, server_ip, COAP_SERVER_PORT,
-                          COAP_METHOD_FETCH, "file",
-                          &client_token, payload, strlen(payload), true);
-}
+# Decode as CoAP
+Analyze → Decode As → UDP port 5683 → CoAP
 ```
 
----
+***
 
-## Protocol Details
+## Performance Considerations
 
-### CoAP Message Types
-- **CON**: Confirmable (requires ACK)
-- **NON**: Non-confirmable
-- **ACK**: Acknowledgment
-- **RST**: Reset (not used)
+### Memory Usage
+- **Client**: ~8KB stack, ~2KB heap
+- **Server**: ~10KB stack, ~3KB heap
+- **Block transfer buffer**: 1024 bytes
+- **FETCH buffer**: 1024 bytes
+- **Pending messages**: 10 × 1224 bytes = 12.24KB
 
-### Custom CoAP Methods
-```c
-#define COAP_METHOD_iPATCH 0x07  // Custom: append operation
-#define COAP_METHOD_FETCH  0x05  // RFC 8132: selective read
-```
+### Network Efficiency
+- Block2 size: 1024 bytes (optimal for Pi Pico W)
+- Token size: 8 bytes (sufficient for uniqueness)
+- Observe sequence: 16-bit (65535 notifications before wrap)
 
-### Block2 Option Encoding
-```
- 0 1 2 3 4 5 6 7
-+-+-+-+-+-+-+-+-+
-|  Block Num  |M|  SZX  |
-+-+-+-+-+-+-+-+-+
+### Timing
+- ACK timeout: 2 seconds (RFC 7252 default)
+- Observe notification interval: Button press triggered
+- Subscriber timeout: 3 hours of inactivity
 
-Block Num: Block number (shifted left by 4)
-M: More flag (1 = more blocks follow)
-SZX: Size exponent (4 = 1024 bytes)
-```
+***
 
-### Observe Option
-- Value 0: Register for notifications
-- Server increments sequence number on each notification
-- Client detects stale notifications via sequence
+## Testing Checklist
 
----
+- [ ] Server boots and shows green LED
+- [ ] Client boots, connects, and subscribes (cyan LED)
+- [ ] PUT request controls LED/buzzer
+- [ ] iPATCH appends text to file
+- [ ] FETCH retrieves specific line range with Content-Format validation
+- [ ] GET file transfer completes (text and image)
+- [ ] Button notifications received on client
+- [ ] Retransmission works (unplug network cable temporarily)
+- [ ] Duplicate detection prevents double-processing
+- [ ] Timeout shows red LED after 4 retries
 
-## Memory Considerations
+***
 
-### Stack Usage
-- **Server scratch buffer**: 1536 bytes (for FETCH responses)
-- **Client scratch buffer**: 1024 bytes
-- **File transfer buffer**: 1024 bytes (static in function scope)
-
-### Heap Usage
-- **lwIP pbufs**: Allocated per packet (freed after processing)
-- **Subscriber array**: 5 × ~64 bytes = 320 bytes
-- **Pending messages**: 8 × ~1088 bytes = 8.7 KB
-
-### SD Card I/O
-- **Direct write**: No intermediate RAM buffer for block transfers
-- **FETCH read**: Temporary 1024-byte buffer on stack
-
----
-
-## Error Handling
-
-### Network Errors
-- UDP send failure → logged, no retry (retransmission handles it)
-- Parse errors → packet dropped, logged to serial
-
-### File System Errors
-- File not found → send 4.04 Not Found
-- Write failure → send 5.03 Service Unavailable
-- SD card init failure → loop indefinitely until successful
-
-### Timeout Handling
-- **Client**: Max 4 retries, then red LED + error callback
-- **Server**: Subscriber timeout after 3 × 3-hour periods without ACK
-
----
-
-## LED Status Codes
-
-### Server
-| Color | Pattern | Meaning |
-|-------|---------|---------|
-| Blue-Green (10,10) | Steady | Idle/ready |
-| Green (50,0) | Single | Button pressed / sending |
-| Red (50,0,0) | Single | Retransmit failure |
-
-### Client
-| Color | Pattern | Meaning |
-|-------|---------|---------|
-| Blue-Green (10,10) | Steady | Connected/ready |
-| Yellow (50,50) | Single | LED/buzzer toggle sent |
-| Green (50,0) | Double | Append confirmed |
-| Cyan (50,50) | Triple | File transfer complete |
-| Red (50,0,0) | Single | Error |
-
----
-
-## Testing & Debugging
-
-### Enable Tracing
-Uncomment in relevant files:
-```c
-#define TRACE_PRINTF printf
-// #define TRACE_PRINTF(fmt, args...)  // Disable
-```
-
-### Serial Output
-- Server: Lists files on SD card at startup
-- Client: Shows token, button presses, block numbers
-- Both: Display Wi-Fi connection status, CoAP packet details
-
-### Common Issues
-
-**Client not receiving notifications**:
-- Check subscriber array on server (serial output)
-- Verify token matches between subscription and notifications
-- Ensure NAT doesn't change client port
-
-**File transfer stalls**:
-- Check `waiting_for_ack` flag on server
-- Verify block numbers increment sequentially
-- Look for "Block gap" messages on client
-
-**SD card errors**:
-- Reduce SPI baud rate in `hw_config.c`
-- Check FAT32 formatting
-- Verify power supply (SD cards draw current spikes)
-
----
-
-## Performance Optimization
-
-### Tuning Parameters
-
-**Retransmission timeout** (`cs04_coap_reliability.h`):
-```c
-#define INITIAL_TIMEOUT_MS 2000  // Increase for slow networks
-```
-
-**SPI baud rate** (`hw_config.c`):
-```c
-.baud_rate = 12500000,  // Reduce if SD errors occur
-```
-
-**Block size** (both client and server):
-```c
-#define BLOCK_SIZE 1024  // Must match! Use 512 for marginal networks
-```
-
-### Profiling Results
-- File transfer: ~764 KiB/s write, ~926 KiB/s read (12.5 MHz SPI)
-- CoAP round-trip: <50ms on local network
-- Button press to notification: <100ms
-
----
-
-## Future Development
-
-### Planned Features
-- Multiple simultaneous file transfers
-- DELETE method for file removal
-- DTLS security layer
-- Power-saving mode (deep sleep between operations)
-
-### Code Improvements
-- Refactor endpoint handlers into separate files
-- Add unit tests for CoAP packet functions
-- Implement CoRE Link Format for `.well-known/core`
-
----
-
-For build instructions and hardware setup, see root `README.md`.
+**Last Updated**: November 23, 2025
+**For user documentation, see**: `../README.md`
+**For testing commands, see**: `../TESTING.md`

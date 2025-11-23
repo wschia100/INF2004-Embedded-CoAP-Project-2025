@@ -73,3 +73,7 @@ Thumbs.db
 *.log
 .local
 .env
+*.zip
+
+# clang
+.clang-format
