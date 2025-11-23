@@ -288,5 +288,5 @@ This implementation is designed for educational purposes and local network use. 
 ---
 
 **Last Updated:** November 19, 2025
-**Author:** [Your Name]
-**Platform:** Raspberry Pi Pico W
+**Author:** CS04
+**Platform:** Raspberry Pi Pico WH
