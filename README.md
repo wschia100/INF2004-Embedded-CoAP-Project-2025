@@ -273,9 +273,10 @@ This implementation is designed for educational purposes and local network use. 
 
 ## 📄 License
 
-- APACHE License - See LICENSE_APACHE.TXT file for details
-- BSD License - See LICENSE_BSD.TXT file for details
-- MIT License - See LICENSE_MIT.TXT file for details
+- MIT License - See LICENSE.TXT file for details
+- BSD License for RPI pico-examples related files - See LICENSE_BSD.TXT file for details
+- APACHE License for no-OS-FatFS-SD-SPI-RPi-Pico - See external_libraries\no-OS-FatFS-SD-SPI-RPi-Pico\LICENSE file for details
+- MIT License for microcoap - See external_libraries\microcoap\LICENSE.txt file for details
 
 ---
 

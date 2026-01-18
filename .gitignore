@@ -77,3 +77,6 @@ Thumbs.db
 
 # clang
 .clang-format
+
+# docs
+src/docs
